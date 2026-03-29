@@ -1,66 +1,75 @@
 #!/usr/bin/env python3
-"""fuzzer - Simple fuzzer for function testing with mutation strategies."""
-import sys, random
+"""fuzzer: Property-based testing / fuzzing framework."""
+import random, sys, traceback
 
-def fuzz_bytes(seed=b"", length=100, mutations=10):
-    data = bytearray(seed or bytes(random.randint(0, 255) for _ in range(length)))
-    for _ in range(mutations):
-        strategy = random.choice(["flip", "insert", "delete", "replace"])
-        if not data: data = bytearray([random.randint(0, 255)])
-        if strategy == "flip":
-            idx = random.randint(0, len(data)-1)
-            bit = random.randint(0, 7)
-            data[idx] ^= (1 << bit)
-        elif strategy == "insert":
-            idx = random.randint(0, len(data))
-            data.insert(idx, random.randint(0, 255))
-        elif strategy == "delete" and len(data) > 1:
-            idx = random.randint(0, len(data)-1)
-            del data[idx]
-        elif strategy == "replace":
-            idx = random.randint(0, len(data)-1)
-            data[idx] = random.randint(0, 255)
-    return bytes(data)
+class Fuzzer:
+    def __init__(self, seed=None):
+        self.rng = random.Random(seed)
+        self.failures = []
 
-def fuzz_string(seed="", charset=None, length=50, mutations=5):
-    chars = charset or [chr(i) for i in range(32, 127)]
-    s = list(seed or [random.choice(chars) for _ in range(length)])
-    for _ in range(mutations):
-        if not s: s = [random.choice(chars)]
-        strategy = random.choice(["replace", "insert", "delete"])
-        if strategy == "replace":
-            s[random.randint(0, len(s)-1)] = random.choice(chars)
-        elif strategy == "insert":
-            s.insert(random.randint(0, len(s)), random.choice(chars))
-        elif strategy == "delete" and len(s) > 1:
-            del s[random.randint(0, len(s)-1)]
-    return "".join(s)
+    def gen_int(self, lo=-1000, hi=1000): return self.rng.randint(lo, hi)
+    def gen_float(self, lo=-1000, hi=1000): return self.rng.uniform(lo, hi)
+    def gen_str(self, max_len=20):
+        n = self.rng.randint(0, max_len)
+        return "".join(chr(self.rng.randint(32, 126)) for _ in range(n))
+    def gen_list(self, gen_elem, max_len=20):
+        n = self.rng.randint(0, max_len)
+        return [gen_elem() for _ in range(n)]
+    def gen_bool(self): return self.rng.choice([True, False])
+    def gen_choice(self, options): return self.rng.choice(options)
 
-def fuzz_test(fn, gen, trials=1000, seed=None):
-    if seed is not None: random.seed(seed)
-    crashes = []
-    for i in range(trials):
-        inp = gen()
-        try:
-            fn(inp)
-        except Exception as e:
-            crashes.append({"trial": i, "input": inp, "error": str(e)})
-    return crashes
+    def check(self, prop, gen_args, trials=100):
+        for i in range(trials):
+            args = gen_args(self)
+            try:
+                result = prop(*args)
+                if result is False:
+                    self.failures.append({"trial": i, "args": args, "error": "returned False"})
+                    return False
+            except Exception as e:
+                self.failures.append({"trial": i, "args": args, "error": str(e)})
+                return False
+        return True
+
+    def shrink_int(self, n):
+        candidates = [0]
+        if n > 0: candidates.extend([n//2, n-1])
+        if n < 0: candidates.extend([n//2, n+1])
+        return candidates
 
 def test():
-    random.seed(42)
-    b = fuzz_bytes(length=10, mutations=3)
-    assert isinstance(b, bytes) and len(b) > 0
-    s = fuzz_string(length=10, mutations=2)
-    assert isinstance(s, str) and len(s) > 0
-    def safe_fn(x): return len(x)
-    crashes = fuzz_test(safe_fn, lambda: fuzz_bytes(length=20), trials=100, seed=42)
-    assert len(crashes) == 0
-    def crashy_fn(x):
-        if len(x) > 5 and x[0] < 50: raise ValueError("crash")
-    crashes2 = fuzz_test(crashy_fn, lambda: fuzz_bytes(length=20), trials=100, seed=42)
-    assert len(crashes2) > 0
-    print("fuzzer: all tests passed")
+    f = Fuzzer(seed=42)
+    # Sort is idempotent
+    assert f.check(
+        lambda lst: sorted(sorted(lst)) == sorted(lst),
+        lambda f: (f.gen_list(lambda: f.gen_int(-100,100)),),
+        trials=50
+    )
+    # Reverse reverse = identity
+    assert f.check(
+        lambda lst: list(reversed(list(reversed(lst)))) == lst,
+        lambda f: (f.gen_list(lambda: f.gen_int()),),
+        trials=50
+    )
+    # Deliberate failure
+    f2 = Fuzzer(seed=0)
+    result = f2.check(
+        lambda n: n < 50,
+        lambda f: (f.gen_int(0, 100),),
+        trials=200
+    )
+    assert not result
+    assert len(f2.failures) > 0
+    # Generators
+    f3 = Fuzzer(seed=1)
+    assert isinstance(f3.gen_str(), str)
+    assert isinstance(f3.gen_float(), float)
+    assert f3.gen_bool() in (True, False)
+    # Shrink
+    assert 0 in f3.shrink_int(10)
+    assert 0 in f3.shrink_int(-5)
+    print("All tests passed!")
 
 if __name__ == "__main__":
-    test() if "--test" in sys.argv else print("Usage: fuzzer.py --test")
+    if len(sys.argv) > 1 and sys.argv[1] == "test": test()
+    else: print("Usage: fuzzer.py test")

@@ -1,11 +1,11 @@
 # fuzzer
 
-fuzzer - Coverage-guided fuzzer with mutation strategies.
+fuzzer: Property-based testing / fuzzing framework.
 
-Zero-dependency, single-file Python CLI.
+Single-file, zero-dependency Python CLI.
 
 ## Usage
 
 ```bash
-python3 fuzzer.py
+python3 fuzzer.py test
 ```
