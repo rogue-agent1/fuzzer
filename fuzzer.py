@@ -1,75 +1,65 @@
 #!/usr/bin/env python3
-"""fuzzer: Property-based testing / fuzzing framework."""
-import random, sys, traceback
+"""fuzzer - Simple fuzzer for finding crashes in functions."""
+import sys, random, string, traceback
+
+class FuzzResult:
+    def __init__(self, input_data, error, traceback_str):
+        self.input = input_data
+        self.error = error
+        self.traceback = traceback_str
 
 class Fuzzer:
     def __init__(self, seed=None):
         self.rng = random.Random(seed)
-        self.failures = []
-
-    def gen_int(self, lo=-1000, hi=1000): return self.rng.randint(lo, hi)
-    def gen_float(self, lo=-1000, hi=1000): return self.rng.uniform(lo, hi)
-    def gen_str(self, max_len=20):
+        self.crashes = []
+        self.runs = 0
+    def random_string(self, max_len=100):
         n = self.rng.randint(0, max_len)
-        return "".join(chr(self.rng.randint(32, 126)) for _ in range(n))
-    def gen_list(self, gen_elem, max_len=20):
+        return "".join(self.rng.choice(string.printable) for _ in range(n))
+    def random_bytes(self, max_len=100):
         n = self.rng.randint(0, max_len)
-        return [gen_elem() for _ in range(n)]
-    def gen_bool(self): return self.rng.choice([True, False])
-    def gen_choice(self, options): return self.rng.choice(options)
-
-    def check(self, prop, gen_args, trials=100):
-        for i in range(trials):
-            args = gen_args(self)
+        return bytes(self.rng.randint(0, 255) for _ in range(n))
+    def random_int(self, min_val=-2**31, max_val=2**31):
+        return self.rng.randint(min_val, max_val)
+    def random_json(self, depth=0):
+        if depth > 3:
+            return self.rng.choice([None, True, False, self.rng.randint(-100,100), self.random_string(10)])
+        t = self.rng.randint(0, 5)
+        if t == 0: return None
+        if t == 1: return self.rng.randint(-1000, 1000)
+        if t == 2: return self.random_string(20)
+        if t == 3: return self.rng.random()
+        if t == 4: return [self.random_json(depth+1) for _ in range(self.rng.randint(0,5))]
+        return {self.random_string(5): self.random_json(depth+1) for _ in range(self.rng.randint(0,3))}
+    def fuzz(self, func, generator, trials=1000):
+        for _ in range(trials):
+            self.runs += 1
+            inp = generator()
             try:
-                result = prop(*args)
-                if result is False:
-                    self.failures.append({"trial": i, "args": args, "error": "returned False"})
-                    return False
+                func(inp)
             except Exception as e:
-                self.failures.append({"trial": i, "args": args, "error": str(e)})
-                return False
-        return True
-
-    def shrink_int(self, n):
-        candidates = [0]
-        if n > 0: candidates.extend([n//2, n-1])
-        if n < 0: candidates.extend([n//2, n+1])
-        return candidates
+                tb = traceback.format_exc()
+                self.crashes.append(FuzzResult(inp, e, tb))
+        return self.crashes
 
 def test():
     f = Fuzzer(seed=42)
-    # Sort is idempotent
-    assert f.check(
-        lambda lst: sorted(sorted(lst)) == sorted(lst),
-        lambda f: (f.gen_list(lambda: f.gen_int(-100,100)),),
-        trials=50
-    )
-    # Reverse reverse = identity
-    assert f.check(
-        lambda lst: list(reversed(list(reversed(lst)))) == lst,
-        lambda f: (f.gen_list(lambda: f.gen_int()),),
-        trials=50
-    )
-    # Deliberate failure
-    f2 = Fuzzer(seed=0)
-    result = f2.check(
-        lambda n: n < 50,
-        lambda f: (f.gen_int(0, 100),),
-        trials=200
-    )
-    assert not result
-    assert len(f2.failures) > 0
-    # Generators
-    f3 = Fuzzer(seed=1)
-    assert isinstance(f3.gen_str(), str)
-    assert isinstance(f3.gen_float(), float)
-    assert f3.gen_bool() in (True, False)
-    # Shrink
-    assert 0 in f3.shrink_int(10)
-    assert 0 in f3.shrink_int(-5)
-    print("All tests passed!")
+    # fuzz a parser that crashes on empty input
+    def fragile_parser(s):
+        if len(s) > 0 and s[0] == "!":
+            raise ValueError("Bang!")
+        return len(s)
+    crashes = f.fuzz(fragile_parser, lambda: f.random_string(10), trials=500)
+    assert len(crashes) > 0  # should find the ! crash
+    assert any("Bang" in str(c.error) for c in crashes)
+    # safe function
+    f2 = Fuzzer(seed=42)
+    crashes2 = f2.fuzz(lambda x: x * 2, lambda: f2.random_int(-100, 100), trials=100)
+    assert len(crashes2) == 0
+    print("OK: fuzzer")
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "test": test()
-    else: print("Usage: fuzzer.py test")
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        test()
+    else:
+        print("Usage: fuzzer.py test")
